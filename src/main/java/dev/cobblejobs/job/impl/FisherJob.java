@@ -1,6 +1,7 @@
 package dev.cobblejobs.job.impl;
 
 import dev.cobblejobs.CobbleJobs;
+import dev.cobblejobs.core.FishingZone;
 import dev.cobblejobs.data.PlayerDataBundle;
 import dev.cobblejobs.job.Job;
 import dev.cobblejobs.job.minigame.ResistanceFishingMinigame;
@@ -8,9 +9,12 @@ import dev.cobblejobs.job.minigame.ResistanceFishingMinigame.FishRarity;
 import dev.cobblejobs.util.FishItemCreator;
 import dev.cobblejobs.util.MessageUtil;
 import net.fabricmc.fabric.api.event.player.AttackBlockCallback;
+import net.minecraft.entity.projectile.FishingBobberEntity;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
+import net.minecraft.particle.ParticleTypes;
 import net.minecraft.server.network.ServerPlayerEntity;
+import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.ActionResult;
 
 import java.util.Map;
@@ -20,17 +24,6 @@ import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Profesión: §bPescador (Fisher)
- *
- * <h2>Mecánicas implementadas</h2>
- * <ol>
- * <li>Anti-AFK por posición XZ.</li>
- * <li>Minijuego de resistencia {@link ResistanceFishingMinigame}:
- * Fase A reacción + Fase B tensión con ciclos por rareza.</li>
- * <li>Clic izquierdo capturado vía {@code AttackBlockCallback} de Fabric API.</li>
- * <li>Sneak detectado via {@code player.isSneaking()} en cada tick.</li>
- * <li>Entrega de ítem y XP al completar todos los ciclos.</li>
- * <li>Limpieza de BossBar y recursos al perder el trabajo o desconectarse.</li>
- * </ol>
  */
 public class FisherJob implements Job {
 
@@ -62,7 +55,7 @@ public class FisherJob implements Job {
     // ════════════════════════════════════════════════════════════════════════
     @Override public String getId()          { return ID; }
     @Override public String getDisplayName() { return "§bPescador"; }
-    @Override public String getDescription() { return "§7Pesca Cobblemon y descubre especies raras."; }
+    @Override public String getDescription() { return "§7Pesca Cobblemon en zonas mágicas y descubre especies raras."; }
     @Override public int    getMaxLevel()    { return MAX_LEVEL; }
 
     // ── Ciclo de vida del trabajo ────────────────────────────────────────────
@@ -73,7 +66,7 @@ public class FisherJob implements Job {
 
         MessageUtil.sendSuccess(player, "§b¡Bienvenido al trabajo de §lPescador§b!");
         MessageUtil.sendInfo(player,
-                "§7Usa tu §ecaña de pescar §7y reacciona cuando aparezca §e§l¡TIRA!");
+                "§7Busca las §bzonas de pesca mágicas §7(con partículas) y usa tu caña.");
         lastPositions.put(player.getUuid(),
                 new double[]{player.getX(), player.getY(), player.getZ()});
     }
@@ -112,19 +105,17 @@ public class FisherJob implements Job {
             }
         }
 
-        // 5. Demo de picada simulada (reemplazar por evento real de Cobblemon)
-        simulateFishBiteDemo(player, tickCount);
+        // 5. Renderizar partículas de las zonas de pesca
+        spawnZoneParticles(player, tickCount);
+
+        // 6. Comprobar si el anzuelo está en una zona válida para iniciar la picada
+        checkFishingZones(player, tickCount);
     }
 
     // ════════════════════════════════════════════════════════════════════════
     // Helpers privados
     // ════════════════════════════════════════════════════════════════════════
 
-    /**
-     * Registra el listener de Clic Izquierdo de Fabric (idempotente).
-     * AttackBlockCallback se dispara cuando el jugador hace clic izquierdo,
-     * incluyendo ataques en el aire en la mayoría de versiones recientes.
-     */
     private synchronized void registerFabricEvents() {
         if (eventsRegistered) return;
         eventsRegistered = true;
@@ -142,24 +133,20 @@ public class FisherJob implements Job {
         CobbleJobs.LOGGER.info("[Fisher] AttackBlockCallback registrado para detección de clic.");
     }
 
-    /** Entrega el ítem y XP cuando el minijuego reporta victoria. */
     private void deliverReward(ServerPlayerEntity player, PlayerDataBundle bundle, UUID uuid) {
         FishRarity rarity   = minigame.getPendingRarity(uuid);
-        String     species  = minigame.getPendingFishName(uuid); // Ahora recibe IDs como "cobblemon:magikarp"
+        String     species  = minigame.getPendingFishName(uuid); 
         minigame.endSession(uuid, true);
         
         if (rarity == null || species == null) return;
 
-        // --- Generación de estadísticas aleatorias ---
         boolean isShiny = RNG.nextFloat() < 0.015f; 
         double weight = 0.5 + (RNG.nextDouble() * 15.0);
         int length = 10 + RNG.nextInt(120);
 
-        // --- Creación del ítem real usando el FishItemCreator ---
         ItemStack reward = FishItemCreator.create(species, weight, length, isShiny, rarity);
         player.getInventory().offerOrDrop(reward);
 
-        // --- Lógica de XP ---
         int xp = switch (rarity) {
             case COMMON    -> XP_COMMON;
             case RARE      -> XP_RARE;
@@ -184,19 +171,59 @@ public class FisherJob implements Job {
                 uuid, rarity, species, finalXp);
     }
 
-    /**
-     * Demo de picada: cada ~10 s, 20 % de chance si el jugador lleva caña y no
-     * tiene sesión activa. Reemplazar por el hook real de Cobblemon en producción.
-     */
-    private void simulateFishBiteDemo(ServerPlayerEntity player, long tickCount) {
-        if (tickCount % 200 != 0) return;
+    // ── Zonas de Pesca ────────────────────────────────────────────────────────
+
+    private void spawnZoneParticles(ServerPlayerEntity player, long tickCount) {
+        if (tickCount % 10 != 0) return; // Se ejecuta cada medio segundo
+
+        ServerWorld world = (ServerWorld) player.getWorld();
+        String dim = world.getRegistryKey().getValue().toString();
+        var zones = CobbleJobs.getInstance().getConfigManager().get().getFishingZones();
+
+        for (FishingZone zone : zones) {
+            if (!zone.getDimension().equals(dim)) continue;
+            
+            // Renderizar partículas solo si el jugador está a menos de 64 bloques
+            if (player.squaredDistanceTo(zone.getCenterX(), zone.getCenterY(), zone.getCenterZ()) > 4096) continue;
+
+            int area = (zone.getMaxX() - zone.getMinX()) * (zone.getMaxZ() - zone.getMinZ());
+            int particlesToSpawn = Math.min(40, Math.max(5, area / 2));
+
+            for (int i = 0; i < particlesToSpawn; i++) {
+                double x = zone.getMinX() + RNG.nextDouble() * (zone.getMaxX() - zone.getMinX() + 1);
+                double y = zone.getMaxY() + 0.2; // Flotando sobre el agua
+                double z = zone.getMinZ() + RNG.nextDouble() * (zone.getMaxZ() - zone.getMinZ() + 1);
+
+                // Estrellas mágicas
+                world.spawnParticles(ParticleTypes.ENCHANTED_HIT, x, y, z, 1, 0, 0, 0, 0.05);
+                
+                // Conchas marinas raras
+                if (RNG.nextFloat() < 0.2f) {
+                    world.spawnParticles(ParticleTypes.NAUTILUS, x, y, z, 1, 0, 0, 0, 0.02);
+                }
+            }
+        }
+    }
+
+    private void checkFishingZones(ServerPlayerEntity player, long tickCount) {
         if (minigame.hasActiveSession(player.getUuid())) return;
-        if (player.getMainHandStack().getItem() != Items.FISHING_ROD) return;
-        if (RNG.nextFloat() > 0.20f) return;
+
+        FishingBobberEntity hook = player.fishHook;
+        if (hook == null || !hook.isTouchingWater()) return;
+
+        String dim = player.getWorld().getRegistryKey().getValue().toString();
+        boolean inZone = CobbleJobs.getInstance().getConfigManager().get().getFishingZones()
+                .stream().anyMatch(z -> z.contains(hook.getX(), hook.getY(), hook.getZ(), dim));
+
+        if (!inZone) return;
+
+        // Probabilidad de picada si está en la zona (15% cada segundo)
+        if (tickCount % 20 != 0) return;
+        if (RNG.nextFloat() > 0.15f) return; 
 
         float rarityMult = CobbleJobs.getInstance().getDynamicEventManager().getRarityMultiplier();
         FishRarity rarity = rollRarity(rarityMult);
-        String species    = pickSpecies(rarity); // Cambiado a pickSpecies para obtener IDs reales
+        String species = pickSpecies(rarity);
 
         minigame.startSession(player, rarity, species, tickCount);
     }
@@ -213,9 +240,6 @@ public class FisherJob implements Job {
         return FishRarity.COMMON;
     }
 
-    /**
-     * Devuelve el ID de la especie de Cobblemon para el minijuego.
-     */
     private String pickSpecies(FishRarity rarity) {
         return switch (rarity) {
             case LEGENDARY -> "cobblemon:kyogre";
