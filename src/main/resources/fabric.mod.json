@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "id": "cobblejobs",
+  "version": "${version}",
+  "name": "CobbleJobs",
+  "description": "Sistema de trabajos modular para Cobblemon con economía, minijuegos y eventos dinámicos.",
+  "authors": ["TuNombre"],
+  "contact": {
+    "sources": "https://github.com/tu-usuario/cobblejobs"
+  },
+  "license": "MIT",
+  "environment": "*",
+  "entrypoints": {
+    "main": ["dev.cobblejobs.CobbleJobs"]
+  },
+  "mixins": [],
+  "depends": {
+    "fabricloader": ">=0.15.11",
+    "minecraft":    "~1.21.1",
+    "java":         ">=21",
+    "fabric-api":   "*",
+    "cobblemon":    ">=1.7.3"
+  }
+}
