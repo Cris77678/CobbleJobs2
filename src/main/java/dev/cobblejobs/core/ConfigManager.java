@@ -13,12 +13,12 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * Carga y guarda la configuración global del mod desde
  * {@code config/cobblejobs/config.json}.
- *
- * <p>Si el archivo no existe, se crean los valores por defecto y se persisten.
  */
 public class ConfigManager {
 
@@ -85,5 +85,14 @@ public class ConfigManager {
 
         @SerializedName("debug_mode")
         private boolean debugMode = false;
+
+        // NUEVO: Lista de zonas de pesca
+        @SerializedName("fishing_zones")
+        private List<FishingZone> fishingZones = new ArrayList<>();
+
+        public Config() {
+            // Generar una zona de ejemplo por defecto para que el usuario sepa cómo configurarla
+            fishingZones.add(new FishingZone(100, 62, 100, 110, 64, 110));
+        }
     }
 }
